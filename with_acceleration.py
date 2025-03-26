@@ -13,11 +13,12 @@ MAX_VELOCITY = 5
 rect_acceleration: v2 = v2(0, 0)
 rect_velocity: v2 = v2(0, 0)
 rect_position: v2 = v2(0, 0)
-BASE_FPS = 0
+BASE_FPS = 60
 
 run = True
 while run:
     loop_time: int = clock.tick(BASE_FPS) # ms
+    print(loop_time)
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             run = False
