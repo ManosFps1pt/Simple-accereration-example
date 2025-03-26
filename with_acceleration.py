@@ -47,10 +47,14 @@ while run:
 
     pygame.display.set_caption(f"{clock.get_fps():.2f} fps \t velocity: {rect_velocity}")
     rect_position += rect_velocity + .5 * rect_acceleration
-    if rect_position.x<0: rect_position.x=1
-    if rect_position.y<0: rect_position.y=1
-    if rect_position.x>SCREEN_SIZE.x-rect.width+1: rect_position.x=SCREEN_SIZE.x-rect.width+1
-    if rect_position.y>SCREEN_SIZE.y-rect.height+1: rect_position.y=SCREEN_SIZE.y-rect.height+1
+    if rect_position.x<0:
+        rect_position.x=1
+    if rect_position.y<0:
+        rect_position.y=1
+    if rect_position.x > SCREEN_SIZE.x - rect.width + 1:
+        rect_position.x = SCREEN_SIZE.x - rect.width + 1
+    if rect_position. y >SCREEN_SIZE.y - rect.height + 1:
+        rect_position.y = SCREEN_SIZE.y - rect.height + 1
     SCREEN.fill("#000000")
     rect.topleft = rect_position
     pygame.draw.rect(SCREEN, "#FFFFFF", rect)
