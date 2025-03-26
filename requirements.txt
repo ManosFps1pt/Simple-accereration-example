@@ -1,2 +1,1 @@
 pygame~=2.6.1
-cx_Freeze~=8.0.0
