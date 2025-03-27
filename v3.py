@@ -1,20 +1,22 @@
 import pygame
+import tkinter as tk
 from pygame import Vector2
 
 v2 = pygame.Vector2
 pygame.init()
 
+app = tk.Tk()
 SCREEN_SIZE = v2(800, 600)
 SCREEN = pygame.display.set_mode(SCREEN_SIZE)
 rect = pygame.Rect(0, 300, 40, 20)
 clock = pygame.time.Clock()
-ACCELERATION = 5000 # pixels/second^2?
+ACCELERATION = 5000 # pixels/frame^2?
 FRICTION = 10
 MAX_VELOCITY = 500 # pixels/second?
 rect_acceleration = v2(0, 0)
 rect_velocity = v2(0, 0)
 rect_position: Vector2 = v2(0, 300)
-BASE_FPS = 60
+BASE_FPS = 0
 
 run = True
 while run:
