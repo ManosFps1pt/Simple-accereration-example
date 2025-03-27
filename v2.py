@@ -1,7 +1,6 @@
 import pygame
-from pygame import Vector2
 
-v2 = pygame.Vector2
+v2 = pygame.math.Vector2
 pygame.init()
 
 SCREEN_SIZE = v2(800, 600)
@@ -13,7 +12,7 @@ FRICTION = 10 # s¯¹
 MAX_VELOCITY = 500 # px/s
 rect_acceleration = v2(0, 0) # px/s²?
 rect_velocity = v2(0, 0) # px/s
-rect_position: Vector2 = v2(0, 300) # px
+rect_position: v2 = v2(0, 300) # px
 BASE_FPS = 0
 
 run = True
@@ -74,10 +73,10 @@ while run:
     fps = clock.get_fps()
     if fps == 0:
         continue
-    output_msg = f"{clock.get_fps():.2f} fps\t"\
-                 f"acceleration: {rect_acceleration} px/s², "\
+    output_msg = f"acceleration: {rect_acceleration} px/s², "\
                  f"velocity: {rect_velocity} px/s, "\
-                 f"vector length: {rect_velocity.length():.2f} px/s"
+                 f"vector length: {rect_velocity.length():.2f} px/s\t"\
+                 f"{clock.get_fps():.2f} fps"
     pygame.display.set_caption(output_msg)
     print(output_msg)
     # Draw updates
