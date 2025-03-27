@@ -8,13 +8,13 @@ SCREEN_SIZE = v2(800, 600)
 SCREEN = pygame.display.set_mode(SCREEN_SIZE)
 rect = pygame.Rect(0, 300, 40, 20)
 clock = pygame.time.Clock()
-ACCELERATION = 5000 # pixels/second^2?
-FRICTION = 10
-MAX_VELOCITY = 500 # pixels/second?
-rect_acceleration = v2(0, 0)
-rect_velocity = v2(0, 0)
-rect_position: Vector2 = v2(0, 300)
-BASE_FPS = 60
+ACCELERATION = 5000 # px/s²?
+FRICTION = 10 # s¯¹
+MAX_VELOCITY = 500 # px/s
+rect_acceleration = v2(0, 0) # px/s²?
+rect_velocity = v2(0, 0) # px/s
+rect_position: Vector2 = v2(0, 300) # px
+BASE_FPS = 0
 
 run = True
 while run:
@@ -59,22 +59,27 @@ while run:
     rect_position += rect_velocity * loop_time + 0.5 * rect_acceleration * (loop_time ** 2)
 
     # Screen boundaries
-    if rect_position.x<0:
+    if rect_position.x<1:
         rect_position.x=1
         rect_velocity.x = 0
-    if rect_position.y<0:
+    if rect_position.y<1:
         rect_position.y=1
         rect_velocity.y = 0
     if rect_position.x > SCREEN_SIZE.x - rect.width + 1:
         rect_position.x = SCREEN_SIZE.x - rect.width + 1
         rect_velocity.x = 0
-    if rect_position. y >SCREEN_SIZE.y - rect.height + 1:
+    if rect_position. y > SCREEN_SIZE.y - rect.height + 1:
         rect_position.y = SCREEN_SIZE.y - rect.height + 1
         rect_velocity.y = 0
     fps = clock.get_fps()
     if fps == 0:
         continue
-    pygame.display.set_caption(f"{fps:.2f} fps \t velocity: {rect_velocity}")
+    output_msg = f"{clock.get_fps():.2f} fps\t"\
+                 f"acceleration: {rect_acceleration} px/s², "\
+                 f"velocity: {rect_velocity} px/s, "\
+                 f"vector length: {rect_velocity.length():.2f} px/s"
+    pygame.display.set_caption(output_msg)
+    print(output_msg)
     # Draw updates
     SCREEN.fill("#000000")
     rect.topleft = rect_position
