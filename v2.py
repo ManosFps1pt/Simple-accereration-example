@@ -77,8 +77,8 @@ while run:
                  f"velocity: {rect_velocity} px/s, "\
                  f"vector length: {rect_velocity.length():.2f} px/s\t"\
                  f"{clock.get_fps():.2f} fps"
-    pygame.display.set_caption(output_msg)
-    print(output_msg)
+    # pygame.display.set_caption(output_msg)
+    # print(output_msg)
     # Draw updates
     SCREEN.fill("#000000")
     rect.topleft = rect_position
