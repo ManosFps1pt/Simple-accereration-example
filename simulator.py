@@ -69,16 +69,13 @@ class Turret:
         rad = atan2_ang - robot_heading
         self.angle_to_goal = normalize_angle(rad)
 
-    def look_to_goal_while_moving(self, robot_pose, robot_velocity, goal_pose, is_red=True):
+    def look_to_goal_while_moving(self, robot_pose, robot_velocity, goal_pose, robot_heading=0):
         # Compensated pose based on lead factor
         comp_x = robot_pose.x + self.moving_shot_lead_factor * robot_velocity.x
         comp_y = robot_pose.y + self.moving_shot_lead_factor * robot_velocity.y
         compensated_pose = pygame.Vector2(comp_x, comp_y)
-        self.look_to_goal(robot_pose, compensated_pose) # Target the compensated pose from the robot's current pose! 
-        # Wait, the java code does: lookToGoal(compensatedPose, isRed). 
-        # Aiming AT (goal + a*vel) from (pose) is equivalent to aiming AT (goal) from (pose - a*vel).
-        # So we should calculate angle from compensated_pose TO goal_pose.
-        self.look_to_goal(compensated_pose, goal_pose, 0)
+        # Aiming AT (goal + a*vel) from (pose) is equivalent to aiming AT (goal) from (pose - a*vel)
+        self.look_to_goal(compensated_pose, goal_pose, robot_heading)
         
     def update(self, dt):
         """Light Trapezoidal Motion Profile"""
@@ -133,6 +130,13 @@ class Robot:
         self.friction = 3.0 # damping factor
         self.max_velocity = 40.0 # inches/s
         
+        self.heading = 0.0 # radians
+        self.angular_velocity = 0.0 # rad/s
+        self.angular_accel = 50.0 # rad/s^2 (manual input)
+        self.max_angular_accel = 50.0 # rad/s^2 (total)
+        self.max_angular_vel = 16.0 # rad/s
+        self.angular_friction = 10.0 # damping factor
+        
         self.turret = Turret()
         self.is_targeting_red = True
     
@@ -160,6 +164,22 @@ class Robot:
         if self.acceleration.length() > 0:
             self.acceleration.scale_to_length(self.max_accel)
             
+        # 1b. Input for rotation
+        self.angular_acceleration = 0.0
+        if keys[pygame.K_q]:
+            self.angular_acceleration += self.angular_accel
+        if keys[pygame.K_e]:
+            self.angular_acceleration -= self.angular_accel
+            
+        if joystick:
+            # Handle standard controller right stick or triggers
+            # Axis 2 is often right stick X or triggers on some controllers
+            for axis in range(2, min(joystick.get_numaxes(), 4)):
+                val = joystick.get_axis(axis)
+                if abs(val) > 0.1:
+                    self.angular_acceleration -= val * self.angular_accel
+                    break
+            
         # 2. Physics step
         self.acceleration -= self.velocity * self.friction
         self.velocity += self.acceleration * dt
@@ -167,6 +187,14 @@ class Robot:
             self.velocity.scale_to_length(self.max_velocity)
             
         self.position += self.velocity * dt + 0.5 * self.acceleration * (dt ** 2)
+        
+        # 2b. Rotational Physics step
+        self.angular_acceleration -= self.angular_velocity * self.angular_friction
+        self.angular_velocity += self.angular_acceleration * dt
+        if abs(self.angular_velocity) > self.max_angular_vel:
+            self.angular_velocity = math.copysign(self.max_angular_vel, self.angular_velocity)
+            
+        self.heading = normalize_angle(self.heading + self.angular_velocity * dt)
         
         # 3. Boundaries (keep robot center inside field)
         half_w = ROBOT_WIDTH_INCHES / 2
@@ -188,25 +216,51 @@ class Robot:
             
         # 4. Turret Update
         goal = RED_GOAL_POSE if self.is_targeting_red else BLUE_GOAL_POSE
-        self.turret.look_to_goal_while_moving(self.position, self.velocity, goal, self.is_targeting_red)
+        self.turret.look_to_goal_while_moving(self.position, self.velocity, goal, self.heading)
         self.turret.update(dt)
-
     def draw(self, screen):
-        # Draw Robot Base
+        # Draw Robot Base (Rotated)
         px, py = ftc_to_pixel(self.position.x, self.position.y)
         rect_w = (ROBOT_WIDTH_INCHES / FIELD_SIZE_INCHES) * SCREEN_SIZE
         rect_h = (ROBOT_HEIGHT_INCHES / FIELD_SIZE_INCHES) * SCREEN_SIZE
         
-        rect = pygame.Rect(0, 0, rect_w, rect_h)
-        rect.center = (px, py)
-        pygame.draw.rect(screen, COLOR_ROBOT, rect)
+        # Calculate corners
+        cos_h = math.cos(self.heading)
+        sin_h = math.sin(self.heading)
+        
+        half_w = rect_w / 2
+        half_h = rect_h / 2
+        
+        corners = [
+            pygame.Vector2(half_w, half_h),
+            pygame.Vector2(-half_w, half_h),
+            pygame.Vector2(-half_w, -half_h),
+            pygame.Vector2(half_w, -half_h)
+        ]
+        
+        rotated_corners = []
+        for c in corners:
+            # Rotate corner (Y is inverted in Pygame screen coords vs math)
+            # Math: x' = x*cos - y*sin, y' = x*sin + y*cos
+            # But screen Y is down, so we adjust
+            rx = c.x * cos_h + c.y * sin_h
+            ry = - (c.x * sin_h - c.y * cos_h)
+            rotated_corners.append((px + rx, py + ry))
+            
+        pygame.draw.polygon(screen, COLOR_ROBOT, rotated_corners)
+        
+        # Draw "Front" Indicator
+        front_x = px + cos_h * (half_w * 0.8)
+        front_y = py - sin_h * (half_w * 0.8)
+        pygame.draw.circle(screen, (50, 50, 50), (int(front_x), int(front_y)), 4)
         
         # Draw Turret
         turret_length = max(rect_w, rect_h) * 0.6
         # math angle to screen coordinates:
-        # positive dx -> right, positive dy -> UP!
-        end_px = px + math.cos(self.turret.angle) * turret_length
-        end_py = py - math.sin(self.turret.angle) * turret_length # minus because UP is -Y visually
+        # absolute turret angle
+        abs_turret_angle = self.heading + self.turret.angle
+        end_px = px + math.cos(abs_turret_angle) * turret_length
+        end_py = py - math.sin(abs_turret_angle) * turret_length 
         
         pygame.draw.line(screen, COLOR_TURRET, (px, py), (end_px, end_py), 5)
         # Draw a small circle at the base
@@ -256,13 +310,13 @@ def main():
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_SPACE:
                     # Shoot!
-                    projectiles.append(Projectile(robot.position, robot.turret.angle, projectile_speed, robot.velocity))
+                    projectiles.append(Projectile(robot.position, robot.heading + robot.turret.angle, projectile_speed, robot.velocity))
                 elif event.key == pygame.K_TAB:
                     # Switch Targets
                     robot.is_targeting_red = not robot.is_targeting_red
             elif event.type == pygame.JOYBUTTONDOWN:
                 if event.button == 0: # A Button
-                    projectiles.append(Projectile(robot.position, robot.turret.angle, projectile_speed, robot.velocity))
+                    projectiles.append(Projectile(robot.position, robot.heading + robot.turret.angle, projectile_speed, robot.velocity))
                 elif event.button == 1: # B Button
                     robot.is_targeting_red = not robot.is_targeting_red
 
@@ -271,7 +325,7 @@ def main():
             space_held_time += dt
             rapid_fire_timer -= dt
             if space_held_time > 0.4 and rapid_fire_timer <= 0:
-                projectiles.append(Projectile(robot.position, robot.turret.angle, projectile_speed, robot.velocity))
+                projectiles.append(Projectile(robot.position, robot.heading + robot.turret.angle, projectile_speed, robot.velocity))
                 rapid_fire_timer = 0.1 # shoot every 0.1 seconds
         else:
             space_held_time = 0.0
@@ -305,11 +359,11 @@ def main():
         goal_str = "RED (144, 144)" if robot.is_targeting_red else "BLUE (0, 144)"
         telems = [
             f"FPS: {clock.get_fps():.1f}",
-            f"Pose: ({robot.position.x:.1f}, {robot.position.y:.1f})",
+            f"Pose: ({robot.position.x:.1f}, {robot.position.y:.1f}) @ {math.degrees(robot.heading):.0f} deg",
             f"Vel: ({robot.velocity.x:.1f}, {robot.velocity.y:.1f})",
             f"Targeting: {goal_str} [Press TAB to switch]",
-            f"Turret Ang: {math.degrees(robot.turret.angle):.0f} deg (Target: {math.degrees(robot.turret.angle_to_goal):.0f})",
-            f"Press SPACE to Shoot"
+            f"Turret Ang: {math.degrees(robot.turret.angle):.0f} deg (Rel) (Target: {math.degrees(robot.turret.angle_to_goal):.0f})",
+            f"Controls: Arrows = Move, Q/E = Rotate, SPACE = Shoot"
         ]
         
         for i, text in enumerate(telems):
