@@ -1,3 +1,5 @@
+from pygame import Vector2
+from pygame import math
 import pygame
 import math
 import os
@@ -12,7 +14,10 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 # --- Configuration ---
-SCREEN_SIZE = 800
+WINDOW_SIZE = 800
+FIELD_PIXELS = 600
+MARGIN = (WINDOW_SIZE - FIELD_PIXELS) // 2
+
 FIELD_SIZE_INCHES = 144.0
 ROBOT_WIDTH_INCHES = 18.0
 ROBOT_HEIGHT_INCHES = 18.0
@@ -32,14 +37,16 @@ BLUE_GOAL_POSE = pygame.Vector2(0, 144)
 # --- Coordinate Helpers ---
 def ftc_to_pixel(x, y):
     """Convert Cartesian FTC coordinates (0-144) to Pygame screen coordinates."""
-    pixel_x = (x / FIELD_SIZE_INCHES) * SCREEN_SIZE
-    pixel_y = ((FIELD_SIZE_INCHES - y) / FIELD_SIZE_INCHES) * SCREEN_SIZE
+    pixel_x = MARGIN + (x / FIELD_SIZE_INCHES) * FIELD_PIXELS
+    pixel_y = MARGIN + ((FIELD_SIZE_INCHES - y) / FIELD_SIZE_INCHES) * FIELD_PIXELS
     return pygame.Vector2(pixel_x, pixel_y)
 
 def pixel_to_ftc(px, py):
     """Convert Pygame screen coordinates to Cartesian FTC coordinates."""
-    x = (px / SCREEN_SIZE) * FIELD_SIZE_INCHES
-    y = FIELD_SIZE_INCHES - (py / SCREEN_SIZE) * FIELD_SIZE_INCHES
+    px_no_margin = px - MARGIN
+    py_no_margin = py - MARGIN
+    x = (px_no_margin / FIELD_PIXELS) * FIELD_SIZE_INCHES
+    y = FIELD_SIZE_INCHES - (py_no_margin / FIELD_PIXELS) * FIELD_SIZE_INCHES
     return pygame.Vector2(x, y)
 
 def normalize_angle(angle):
@@ -59,7 +66,8 @@ class Turret:
         self.acceleration = 150.0 # rad/s^2
         self.angle_to_goal = 0.0
         
-        self.moving_shot_lead_factor = 1.0
+        self.moving_shot_lead_factor = 0.01
+        self.virtual_aim_point = pygame.Vector2(0, 0)
         
     def look_to_goal(self, robot_pose, goal_pose, robot_heading=0):
         # Cartesian calculation
@@ -70,12 +78,35 @@ class Turret:
         self.angle_to_goal = normalize_angle(rad)
 
     def look_to_goal_while_moving(self, robot_pose, robot_velocity, goal_pose, robot_heading=0):
-        # Compensated pose based on lead factor
-        comp_x = robot_pose.x + self.moving_shot_lead_factor * robot_velocity.x
-        comp_y = robot_pose.y + self.moving_shot_lead_factor * robot_velocity.y
+        # 1. Prevent crash if velocity is zero when getting angle
+        vel_angle = 0.0
+        if robot_velocity.length_squared() > 0.0001:
+            vel_angle = robot_velocity.angle_to(pygame.Vector2(1, 0))
+            # print(f"Velocity Angle: {vel_angle:.2f}")
+
+        # 2. Get distance to goal
+        distance = math.hypot(goal_pose.x - robot_pose.x, goal_pose.y - robot_pose.y)
+        # 3. Apply Compensated pose (Note: robot_velocity.x ALREADY contains magnitude & direction)
+        comp_x = robot_pose.x + self.moving_shot_lead_factor * robot_velocity.x * distance
+        comp_y = robot_pose.y + self.moving_shot_lead_factor * robot_velocity.y * distance
+        # comp_x = robot_pose.x + self.moving_shot_lead_factor * 100 * robot_velocity.x
+        # comp_y = robot_pose.y + self.moving_shot_lead_factor * 100 *  robot_velocity.y
         compensated_pose = pygame.Vector2(comp_x, comp_y)
-        # Aiming AT (goal + a*vel) from (pose) is equivalent to aiming AT (goal) from (pose - a*vel)
+        
+        print(f"comp x ({comp_x}) = {self.moving_shot_lead_factor} * {robot_velocity.x} * {distance}")
+        # 4. CRITICAL: Actually update the turret target angle (this was deleted)
         self.look_to_goal(compensated_pose, goal_pose, robot_heading)
+        
+        # 5. Save the exact virtual point for visualization.
+        #    By deriving it dynamically from compensated_pose, the visuals will faithfully 
+        #    draw no matter what math you plug into comp_x and comp_y above!
+        lead_offset_x = compensated_pose.x - robot_pose.x
+        lead_offset_y = compensated_pose.y - robot_pose.y
+        
+        self.virtual_aim_point = pygame.Vector2(
+            goal_pose.x - lead_offset_x,
+            goal_pose.y - lead_offset_y
+        )
         
     def update(self, dt):
         """Light Trapezoidal Motion Profile"""
@@ -118,7 +149,7 @@ class Projectile:
             
     def draw(self, screen):
         px, py = ftc_to_pixel(self.position.x, self.position.y)
-        pygame.draw.circle(screen, COLOR_PROJECTILE, (int(px), int(py)), int(self.radius_inches / FIELD_SIZE_INCHES * SCREEN_SIZE))
+        pygame.draw.circle(screen, COLOR_PROJECTILE, (int(px), int(py)), int(self.radius_inches / FIELD_SIZE_INCHES * FIELD_PIXELS))
 
 class Robot:
     def __init__(self):
@@ -221,8 +252,8 @@ class Robot:
     def draw(self, screen):
         # Draw Robot Base (Rotated)
         px, py = ftc_to_pixel(self.position.x, self.position.y)
-        rect_w = (ROBOT_WIDTH_INCHES / FIELD_SIZE_INCHES) * SCREEN_SIZE
-        rect_h = (ROBOT_HEIGHT_INCHES / FIELD_SIZE_INCHES) * SCREEN_SIZE
+        rect_w = (ROBOT_WIDTH_INCHES / FIELD_SIZE_INCHES) * FIELD_PIXELS
+        rect_h = (ROBOT_HEIGHT_INCHES / FIELD_SIZE_INCHES) * FIELD_PIXELS
         
         # Calculate corners
         cos_h = math.cos(self.heading)
@@ -265,10 +296,41 @@ class Robot:
         pygame.draw.line(screen, COLOR_TURRET, (px, py), (end_px, end_py), 5)
         # Draw a small circle at the base
         pygame.draw.circle(screen, COLOR_TURRET, (int(px), int(py)), 8)
+        
+        # --- Visualizing Vectors and Aiming ---
+        
+        # 1. Exact Point the Turret Aims (Virtual Aim Point)
+        aim_px, aim_py = ftc_to_pixel(self.turret.virtual_aim_point.x, self.turret.virtual_aim_point.y)
+        pygame.draw.circle(screen, (50, 255, 255), (int(aim_px), int(aim_py)), 4)
+        cross_size = 10
+        pygame.draw.line(screen, (50, 255, 255), (aim_px - cross_size, aim_py), (aim_px + cross_size, aim_py), 2)
+        pygame.draw.line(screen, (50, 255, 255), (aim_px, aim_py - cross_size), (aim_px, aim_py + cross_size), 2)
+        
+        # 2. Intended Aim Line (from robot to virtual aim point)
+        pygame.draw.line(screen, (0, 150, 150), (px, py), (aim_px, aim_py), 1)
+
+        # 3. Laser Beam for Current Turret Line of Sight
+        laser_end_px = px + math.cos(abs_turret_angle) * 2000
+        laser_end_py = py - math.sin(abs_turret_angle) * 2000
+        pygame.draw.line(screen, (255, 100, 100), (px, py), (laser_end_px, laser_end_py), 1)
+        
+        # 4. Robot Velocity Vector (Green)
+        vel_scale = 0.5 # Scale down for visualization
+        v_px, v_py = ftc_to_pixel(self.position.x + self.velocity.x * vel_scale, self.position.y + self.velocity.y * vel_scale)
+        if self.velocity.length() > 1.0:
+            pygame.draw.line(screen, (0, 255, 0), (px, py), (v_px, v_py), 3)
+            pygame.draw.circle(screen, (0, 200, 0), (int(v_px), int(v_py)), 4)
+            
+        # 5. Robot Acceleration Vector (Orange)
+        accel_scale = 0.2
+        a_px, a_py = ftc_to_pixel(self.position.x + self.acceleration.x * accel_scale, self.position.y + self.acceleration.y * accel_scale)
+        if self.acceleration.length() > 5.0:
+            pygame.draw.line(screen, (255, 165, 0), (px, py), (a_px, a_py), 2)
+            pygame.draw.circle(screen, (200, 100, 0), (int(a_px), int(a_py)), 3)
 
 def main():
     pygame.init()
-    screen = pygame.display.set_mode((SCREEN_SIZE, SCREEN_SIZE))
+    screen = pygame.display.set_mode((WINDOW_SIZE, WINDOW_SIZE))
     pygame.display.set_caption("FTC Turret Simulator")
     clock = pygame.time.Clock()
     
@@ -278,7 +340,7 @@ def main():
     if os.path.exists(field_path):
         try:
             raw_field = pygame.image.load(field_path).convert()
-            field_image = pygame.transform.scale(raw_field, (SCREEN_SIZE, SCREEN_SIZE))
+            field_image = pygame.transform.scale(raw_field, (FIELD_PIXELS, FIELD_PIXELS))
         except Exception as e:
             print(f"Warning: Could not load field.png: {e}")
 
@@ -338,10 +400,9 @@ def main():
         projectiles = [p for p in projectiles if p.active]
             
         # Draw
+        screen.fill(COLOR_BG)
         if field_image:
-            screen.blit(field_image, (0, 0))
-        else:
-            screen.fill(COLOR_BG)
+            screen.blit(field_image, (MARGIN, MARGIN))
             
         # Draw Goals
         red_px, red_py = ftc_to_pixel(RED_GOAL_POSE.x, RED_GOAL_POSE.y)
@@ -363,7 +424,8 @@ def main():
             f"Vel: ({robot.velocity.x:.1f}, {robot.velocity.y:.1f})",
             f"Targeting: {goal_str} [Press TAB to switch]",
             f"Turret Ang: {math.degrees(robot.turret.angle):.0f} deg (Rel) (Target: {math.degrees(robot.turret.angle_to_goal):.0f})",
-            f"Controls: Arrows = Move, Q/E = Rotate, SPACE = Shoot"
+            f"Controls: Arrows = Move, Q/E = Rotate, SPACE = Shoot",
+            f"Vectors: Green=Vel, Orange=Accel, Cyan=Aim, Red=Laser"
         ]
         
         for i, text in enumerate(telems):
