@@ -14,7 +14,7 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 # --- Configuration ---
-WINDOW_SIZE = 800
+WINDOW_SIZE = 1500
 FIELD_PIXELS = 600
 MARGIN = (WINDOW_SIZE - FIELD_PIXELS) // 2
 
@@ -93,7 +93,7 @@ class Turret:
         # comp_y = robot_pose.y + self.moving_shot_lead_factor * 100 *  robot_velocity.y
         compensated_pose = pygame.Vector2(comp_x, comp_y)
         
-        print(f"comp x ({comp_x}) = {self.moving_shot_lead_factor} * {robot_velocity.x} * {distance}")
+        # print(f"comp x ({comp_x}) = {self.moving_shot_lead_factor} * {robot_velocity.x} * {distance}")
         # 4. CRITICAL: Actually update the turret target angle (this was deleted)
         self.look_to_goal(compensated_pose, goal_pose, robot_heading)
         
