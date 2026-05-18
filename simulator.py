@@ -4,6 +4,7 @@ import pygame
 import math
 import os
 import sys
+import json
 
 def resource_path(relative_path):
     """ Get absolute path to resource, works for dev and for PyInstaller """
@@ -14,8 +15,8 @@ def resource_path(relative_path):
     return os.path.join(base_path, relative_path)
 
 # --- Configuration ---
-WINDOW_SIZE = 1500
-FIELD_PIXELS = 600
+WINDOW_SIZE = 1000
+FIELD_PIXELS = 500
 MARGIN = (WINDOW_SIZE - FIELD_PIXELS) // 2
 
 FIELD_SIZE_INCHES = 144.0
@@ -33,6 +34,26 @@ COLOR_PROJECTILE = (255, 255, 0)
 # Target Goals (Cartesian)
 RED_GOAL_POSE = pygame.Vector2(144, 144)
 BLUE_GOAL_POSE = pygame.Vector2(0, 144)
+
+# Aiming behavior
+ENABLE_SHOOT_ON_THE_MOVE = False
+ENABLE_INTERPOLATED_TURRET_LUT = True
+CALIBRATION_EXPORT_PATH = "turret_position_lut_samples.json"
+
+# Example position LUT: ((robot_x, robot_y), (aim_x, aim_y))
+# Sample the field positions you care about and the point you actually want
+# the turret to face from each of those positions.
+TURRET_POSITION_LUT = [
+    ((72.0, 72.0), (144.0, 144.0)),
+    ((36.5, 131.5), (144.0, 133.9)),
+    ((96.5, 9.6), (133.9, 144.0)),
+    ((57.6, 20.2), (139.2, 144.0)),
+    ((73.4, 9.1), (137.8, 144.0)),
+    ((50.4, 108.0), (144.0, 135.8)),
+    ((85.4, 97.9), (139.2, 144.0))
+]
+
+DEFAULT_MANUAL_AIM_OFFSET = pygame.Vector2(0.0, 0.0)
 
 # --- Coordinate Helpers ---
 def ftc_to_pixel(x, y):
@@ -57,35 +78,80 @@ def normalize_angle(angle):
         angle += 2 * math.pi
     return angle
 
+def clamp_to_field(point):
+    return pygame.Vector2(
+        max(0.0, min(FIELD_SIZE_INCHES, point.x)),
+        max(0.0, min(FIELD_SIZE_INCHES, point.y))
+    )
+
+def interpolate_virtual_aim_point(robot_pose, lut_points, neighbor_count=3):
+    """Interpolate a virtual aim point from sampled robot positions."""
+    if not lut_points:
+        return None
+
+    weighted_neighbors = []
+    for sample_position, aim_position in lut_points:
+        sample_vec = pygame.Vector2(sample_position)
+        aim_vec = pygame.Vector2(aim_position)
+        distance = robot_pose.distance_to(sample_vec)
+        if distance < 1e-6:
+            return aim_vec
+        weighted_neighbors.append((distance, aim_vec))
+
+    weighted_neighbors.sort(key=lambda sample: sample[0])
+    neighbors = weighted_neighbors[:max(1, min(neighbor_count, len(weighted_neighbors)))]
+
+    total_weight = 0.0
+    interpolated_point = pygame.Vector2(0, 0)
+    for distance, aim_vec in neighbors:
+        weight = 1.0 / (distance ** 2)
+        interpolated_point += aim_vec * weight
+        total_weight += weight
+
+    if total_weight == 0.0:
+        return None
+    return interpolated_point / total_weight
+
 # --- Classes ---
 class Turret:
-    def __init__(self):
+    def __init__(self, shoot_on_the_move=True, use_interpolated_lut=False, position_lut=None):
         self.angle = 0.0 # radians
         self.velocity = 0.0 # rad/s
         self.max_velocity = 8.0 # rad/s
         self.acceleration = 150.0 # rad/s^2
         self.angle_to_goal = 0.0
-        
+
+        self.shoot_on_the_move = shoot_on_the_move
+        self.use_interpolated_lut = use_interpolated_lut
+        self.position_lut = list(position_lut or [])
         self.moving_shot_lead_factor = 0.01
         self.virtual_aim_point = pygame.Vector2(0, 0)
-        
+
+    def _distance_to_goal(self, robot_pose, goal_pose):
+        return math.hypot(goal_pose.x - robot_pose.x, goal_pose.y - robot_pose.y)
+
+    def _get_virtual_aim_point(self, robot_pose, goal_pose):
+        if not self.use_interpolated_lut:
+            return pygame.Vector2(goal_pose)
+        return interpolate_virtual_aim_point(robot_pose, self.position_lut) or pygame.Vector2(goal_pose)
+
     def look_to_goal(self, robot_pose, goal_pose, robot_heading=0):
+        aim_point = self._get_virtual_aim_point(robot_pose, goal_pose)
         # Cartesian calculation
-        dx = goal_pose.x - robot_pose.x
-        dy = goal_pose.y - robot_pose.y
+        dx = aim_point.x - robot_pose.x
+        dy = aim_point.y - robot_pose.y
         atan2_ang = math.atan2(dy, dx)
         rad = atan2_ang - robot_heading
         self.angle_to_goal = normalize_angle(rad)
+        self.virtual_aim_point = pygame.Vector2(aim_point)
 
     def look_to_goal_while_moving(self, robot_pose, robot_velocity, goal_pose, robot_heading=0):
-        # 1. Prevent crash if velocity is zero when getting angle
-        vel_angle = 0.0
-        if robot_velocity.length_squared() > 0.0001:
-            vel_angle = robot_velocity.angle_to(pygame.Vector2(1, 0))
-            # print(f"Velocity Angle: {vel_angle:.2f}")
+        if not self.shoot_on_the_move:
+            self.look_to_goal(robot_pose, goal_pose, robot_heading)
+            return
 
         # 2. Get distance to goal
-        distance = math.hypot(goal_pose.x - robot_pose.x, goal_pose.y - robot_pose.y)
+        distance = self._distance_to_goal(robot_pose, goal_pose)
         # 3. Apply Compensated pose (Note: robot_velocity.x ALREADY contains magnitude & direction)
         comp_x = robot_pose.x + self.moving_shot_lead_factor * robot_velocity.x * distance
         comp_y = robot_pose.y + self.moving_shot_lead_factor * robot_velocity.y * distance
@@ -94,19 +160,9 @@ class Turret:
         compensated_pose = pygame.Vector2(comp_x, comp_y)
         
         # print(f"comp x ({comp_x}) = {self.moving_shot_lead_factor} * {robot_velocity.x} * {distance}")
-        # 4. CRITICAL: Actually update the turret target angle (this was deleted)
+        # 4. Update the turret target angle from the compensated pose.
         self.look_to_goal(compensated_pose, goal_pose, robot_heading)
-        
-        # 5. Save the exact virtual point for visualization.
-        #    By deriving it dynamically from compensated_pose, the visuals will faithfully 
-        #    draw no matter what math you plug into comp_x and comp_y above!
-        lead_offset_x = compensated_pose.x - robot_pose.x
-        lead_offset_y = compensated_pose.y - robot_pose.y
-        
-        self.virtual_aim_point = pygame.Vector2(
-            goal_pose.x - lead_offset_x,
-            goal_pose.y - lead_offset_y
-        )
+        self.virtual_aim_point = self._get_virtual_aim_point(robot_pose, goal_pose)
         
     def update(self, dt):
         """Light Trapezoidal Motion Profile"""
@@ -131,6 +187,97 @@ class Turret:
         if abs(distance) < 0.02 and abs(self.velocity) < 0.1:
             self.angle = self.angle_to_goal
             self.velocity = 0
+
+class LutCalibrator:
+    def __init__(self, export_path, initial_samples=None):
+        self.export_path = export_path
+        self.samples = [
+            {
+                "robot": pygame.Vector2(robot_pos),
+                "aim": pygame.Vector2(aim_pos),
+            }
+            for robot_pos, aim_pos in (initial_samples or [])
+        ]
+        self.enabled = False
+        self.manual_aim_point = pygame.Vector2(RED_GOAL_POSE) + DEFAULT_MANUAL_AIM_OFFSET
+        self.show_samples = True
+
+    def toggle(self, robot, goal_pose):
+        self.enabled = not self.enabled
+        if self.enabled:
+            self.manual_aim_point = pygame.Vector2(goal_pose) + DEFAULT_MANUAL_AIM_OFFSET
+            robot.velocity = pygame.Vector2(0, 0)
+            robot.acceleration = pygame.Vector2(0, 0)
+            robot.angular_velocity = 0.0
+            robot.angular_acceleration = 0.0
+        return self.enabled
+
+    def set_goal_default(self, goal_pose):
+        self.manual_aim_point = pygame.Vector2(goal_pose) + DEFAULT_MANUAL_AIM_OFFSET
+
+    def set_manual_aim_point_from_pixel(self, mouse_pos):
+        self.manual_aim_point = clamp_to_field(pixel_to_ftc(*mouse_pos))
+
+    def apply_to_robot(self, robot):
+        robot.turret.virtual_aim_point = pygame.Vector2(self.manual_aim_point)
+        dx = self.manual_aim_point.x - robot.position.x
+        dy = self.manual_aim_point.y - robot.position.y
+        robot.turret.angle_to_goal = normalize_angle(math.atan2(dy, dx) - robot.heading)
+        robot.turret.angle = robot.turret.angle_to_goal
+        robot.turret.velocity = 0.0
+
+    def add_sample(self, robot):
+        sample = {
+            "robot": pygame.Vector2(robot.position),
+            "aim": pygame.Vector2(self.manual_aim_point),
+        }
+
+        for existing in self.samples:
+            if existing["robot"].distance_to(sample["robot"]) < 1.0:
+                existing["robot"] = sample["robot"]
+                existing["aim"] = sample["aim"]
+                return sample, True
+
+        self.samples.append(sample)
+        return sample, False
+
+    def undo_last_sample(self):
+        if self.samples:
+            return self.samples.pop()
+        return None
+
+    def export_samples(self):
+        serializable = [
+            [
+                [round(sample["robot"].x, 2), round(sample["robot"].y, 2)],
+                [round(sample["aim"].x, 2), round(sample["aim"].y, 2)],
+            ]
+            for sample in self.samples
+        ]
+        with open(self.export_path, "w", encoding="utf-8") as export_file:
+            json.dump(serializable, export_file, indent=2)
+        return serializable
+
+    def format_sample(self, sample):
+        return (
+            f"(({sample['robot'].x:.1f}, {sample['robot'].y:.1f}), "
+            f"({sample['aim'].x:.1f}, {sample['aim'].y:.1f}))"
+        )
+
+    def draw(self, screen):
+        if self.show_samples:
+            for sample in self.samples:
+                robot_px = ftc_to_pixel(sample["robot"].x, sample["robot"].y)
+                aim_px = ftc_to_pixel(sample["aim"].x, sample["aim"].y)
+                pygame.draw.circle(screen, (255, 215, 0), (int(robot_px.x), int(robot_px.y)), 5, 1)
+                pygame.draw.circle(screen, (0, 255, 255), (int(aim_px.x), int(aim_px.y)), 4, 1)
+                pygame.draw.line(screen, (120, 120, 0), robot_px, aim_px, 1)
+
+        if self.enabled:
+            aim_px = ftc_to_pixel(self.manual_aim_point.x, self.manual_aim_point.y)
+            pygame.draw.circle(screen, (0, 255, 255), (int(aim_px.x), int(aim_px.y)), 8, 2)
+            pygame.draw.line(screen, (0, 255, 255), (aim_px.x - 12, aim_px.y), (aim_px.x + 12, aim_px.y), 2)
+            pygame.draw.line(screen, (0, 255, 255), (aim_px.x, aim_px.y - 12), (aim_px.x, aim_px.y + 12), 2)
 
 class Projectile:
     def __init__(self, position, angle, velocity_magnitude, initial_velocity):
@@ -168,7 +315,11 @@ class Robot:
         self.max_angular_vel = 16.0 # rad/s
         self.angular_friction = 10.0 # damping factor
         
-        self.turret = Turret()
+        self.turret = Turret(
+            shoot_on_the_move=ENABLE_SHOOT_ON_THE_MOVE,
+            use_interpolated_lut=ENABLE_INTERPOLATED_TURRET_LUT,
+            position_lut=TURRET_POSITION_LUT,
+        )
         self.is_targeting_red = True
     
     def update(self, dt, keys, joystick=None):
@@ -352,6 +503,7 @@ def main():
 
     font = pygame.font.SysFont(None, 24)
     robot = Robot()
+    calibrator = LutCalibrator(CALIBRATION_EXPORT_PATH, TURRET_POSITION_LUT)
     projectiles = []
     
     projectile_speed = 100.0 # inches/s (FTC shots are fast)
@@ -370,19 +522,56 @@ def main():
             if event.type == pygame.QUIT:
                 run = False
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_SPACE:
+                if event.key == pygame.K_c:
+                    enabled = calibrator.toggle(
+                        robot,
+                        RED_GOAL_POSE if robot.is_targeting_red else BLUE_GOAL_POSE
+                    )
+                    print(f"Calibration mode {'enabled' if enabled else 'disabled'}")
+                elif event.key == pygame.K_v and calibrator.enabled:
+                    sample, replaced = calibrator.add_sample(robot)
+                    status = "updated" if replaced else "saved"
+                    print(f"{status}: {calibrator.format_sample(sample)}")
+                elif event.key == pygame.K_BACKSPACE and calibrator.enabled:
+                    removed = calibrator.undo_last_sample()
+                    if removed:
+                        print(f"removed: {calibrator.format_sample(removed)}")
+                elif event.key == pygame.K_x and calibrator.enabled:
+                    exported = calibrator.export_samples()
+                    print(f"Exported {len(exported)} LUT samples to {calibrator.export_path}")
+                elif event.key == pygame.K_s and calibrator.enabled:
+                    calibrator.show_samples = not calibrator.show_samples
+                elif event.key == pygame.K_SPACE and not calibrator.enabled:
                     # Shoot!
                     projectiles.append(Projectile(robot.position, robot.heading + robot.turret.angle, projectile_speed, robot.velocity))
                 elif event.key == pygame.K_TAB:
                     # Switch Targets
                     robot.is_targeting_red = not robot.is_targeting_red
+                    if calibrator.enabled:
+                        calibrator.set_goal_default(RED_GOAL_POSE if robot.is_targeting_red else BLUE_GOAL_POSE)
             elif event.type == pygame.JOYBUTTONDOWN:
                 if event.button == 0: # A Button
                     projectiles.append(Projectile(robot.position, robot.heading + robot.turret.angle, projectile_speed, robot.velocity))
                 elif event.button == 1: # B Button
                     robot.is_targeting_red = not robot.is_targeting_red
+                    if calibrator.enabled:
+                        calibrator.set_goal_default(RED_GOAL_POSE if robot.is_targeting_red else BLUE_GOAL_POSE)
+            elif event.type == pygame.MOUSEBUTTONDOWN and calibrator.enabled:
+                if event.button == 1:
+                    calibrator.set_manual_aim_point_from_pixel(event.pos)
+                elif event.button == 3:
+                    robot.position = clamp_to_field(pixel_to_ftc(*event.pos))
+                    robot.velocity = pygame.Vector2(0, 0)
+                    robot.acceleration = pygame.Vector2(0, 0)
+            elif event.type == pygame.MOUSEMOTION and calibrator.enabled:
+                if event.buttons[0]:
+                    calibrator.set_manual_aim_point_from_pixel(event.pos)
+                elif event.buttons[2]:
+                    robot.position = clamp_to_field(pixel_to_ftc(*event.pos))
+                    robot.velocity = pygame.Vector2(0, 0)
+                    robot.acceleration = pygame.Vector2(0, 0)
 
-        is_shooting = keys[pygame.K_SPACE] or (joystick and joystick.get_button(0))
+        is_shooting = (keys[pygame.K_SPACE] or (joystick and joystick.get_button(0))) and not calibrator.enabled
         if is_shooting:
             space_held_time += dt
             rapid_fire_timer -= dt
@@ -394,7 +583,10 @@ def main():
             rapid_fire_timer = 0.0
 
         # Logic
-        robot.update(dt, keys, joystick)
+        if calibrator.enabled:
+            calibrator.apply_to_robot(robot)
+        else:
+            robot.update(dt, keys, joystick)
         for p in projectiles:
             p.update(dt)
         projectiles = [p for p in projectiles if p.active]
@@ -415,6 +607,7 @@ def main():
             p.draw(screen)
             
         robot.draw(screen)
+        calibrator.draw(screen)
         
         # Telemetry
         goal_str = "RED (144, 144)" if robot.is_targeting_red else "BLUE (0, 144)"
@@ -424,7 +617,10 @@ def main():
             f"Vel: ({robot.velocity.x:.1f}, {robot.velocity.y:.1f})",
             f"Targeting: {goal_str} [Press TAB to switch]",
             f"Turret Ang: {math.degrees(robot.turret.angle):.0f} deg (Rel) (Target: {math.degrees(robot.turret.angle_to_goal):.0f})",
-            f"Controls: Arrows = Move, Q/E = Rotate, SPACE = Shoot",
+            f"Shoot On Move: {'ON' if robot.turret.shoot_on_the_move else 'OFF'} | LUT: {'ON' if robot.turret.use_interpolated_lut else 'OFF'}",
+            f"Cal Mode: {'ON' if calibrator.enabled else 'OFF'} | Samples: {len(calibrator.samples)}",
+            f"Controls: Arrows = Move, Q/E = Rotate, SPACE = Shoot, C = Calibrate",
+            f"Cal: Right-drag robot, Left-drag aim, V = save, X = export, Backspace = undo",
             f"Vectors: Green=Vel, Orange=Accel, Cyan=Aim, Red=Laser"
         ]
         
