@@ -50,7 +50,8 @@ TURRET_POSITION_LUT = [
     ((57.6, 20.2), (139.2, 144.0)),
     ((73.4, 9.1), (137.8, 144.0)),
     ((50.4, 108.0), (144.0, 135.8)),
-    ((85.4, 97.9), (139.2, 144.0))
+    ((85.4, 97.9), (139.2, 144.0)),
+    ((104.26,131.33),(144.0,135.07))
 ]
 
 DEFAULT_MANUAL_AIM_OFFSET = pygame.Vector2(0.0, 0.0)
@@ -83,6 +84,22 @@ def clamp_to_field(point):
         max(0.0, min(FIELD_SIZE_INCHES, point.x)),
         max(0.0, min(FIELD_SIZE_INCHES, point.y))
     )
+
+def is_targeting_blue(goal_pose):
+    return abs(goal_pose.x - BLUE_GOAL_POSE.x) < 1e-6 and abs(goal_pose.y - BLUE_GOAL_POSE.y) < 1e-6
+
+def mirror_point_for_blue_goal(point):
+    return pygame.Vector2(FIELD_SIZE_INCHES - point.x, point.y)
+
+def transform_lut_samples_for_goal(lut_points, goal_pose):
+    if not is_targeting_blue(goal_pose):
+        return lut_points
+
+    return [
+        (mirror_point_for_blue_goal(pygame.Vector2(sample_position)),
+         mirror_point_for_blue_goal(pygame.Vector2(aim_position)))
+        for sample_position, aim_position in lut_points
+    ]
 
 def interpolate_virtual_aim_point(robot_pose, lut_points, neighbor_count=3):
     """Interpolate a virtual aim point from sampled robot positions."""
@@ -133,7 +150,8 @@ class Turret:
     def _get_virtual_aim_point(self, robot_pose, goal_pose):
         if not self.use_interpolated_lut:
             return pygame.Vector2(goal_pose)
-        return interpolate_virtual_aim_point(robot_pose, self.position_lut) or pygame.Vector2(goal_pose)
+        transformed_lut = transform_lut_samples_for_goal(self.position_lut, goal_pose)
+        return interpolate_virtual_aim_point(robot_pose, transformed_lut) or pygame.Vector2(goal_pose)
 
     def look_to_goal(self, robot_pose, goal_pose, robot_heading=0):
         aim_point = self._get_virtual_aim_point(robot_pose, goal_pose)
@@ -227,9 +245,15 @@ class LutCalibrator:
         robot.turret.velocity = 0.0
 
     def add_sample(self, robot):
+        canonical_robot = pygame.Vector2(robot.position)
+        canonical_aim = pygame.Vector2(self.manual_aim_point)
+        if not robot.is_targeting_red:
+            canonical_robot = mirror_point_for_blue_goal(canonical_robot)
+            canonical_aim = mirror_point_for_blue_goal(canonical_aim)
+
         sample = {
-            "robot": pygame.Vector2(robot.position),
-            "aim": pygame.Vector2(self.manual_aim_point),
+            "robot": canonical_robot,
+            "aim": canonical_aim,
         }
 
         for existing in self.samples:
@@ -264,11 +288,16 @@ class LutCalibrator:
             f"({sample['aim'].x:.1f}, {sample['aim'].y:.1f}))"
         )
 
-    def draw(self, screen):
+    def draw(self, screen, goal_pose):
+        display_samples = transform_lut_samples_for_goal(
+            [(sample["robot"], sample["aim"]) for sample in self.samples],
+            goal_pose
+        )
+
         if self.show_samples:
-            for sample in self.samples:
-                robot_px = ftc_to_pixel(sample["robot"].x, sample["robot"].y)
-                aim_px = ftc_to_pixel(sample["aim"].x, sample["aim"].y)
+            for sample_position, aim_position in display_samples:
+                robot_px = ftc_to_pixel(sample_position.x, sample_position.y)
+                aim_px = ftc_to_pixel(aim_position.x, aim_position.y)
                 pygame.draw.circle(screen, (255, 215, 0), (int(robot_px.x), int(robot_px.y)), 5, 1)
                 pygame.draw.circle(screen, (0, 255, 255), (int(aim_px.x), int(aim_px.y)), 4, 1)
                 pygame.draw.line(screen, (120, 120, 0), robot_px, aim_px, 1)
@@ -304,8 +333,8 @@ class Robot:
         self.velocity = pygame.Vector2(0, 0)
         self.acceleration = pygame.Vector2(0, 0)
         
-        self.max_accel = 150.0 # inches/s^2
-        self.friction = 3.0 # damping factor
+        self.max_accel = 300.0 # inches/s^2
+        self.friction = 7.0 # damping factor
         self.max_velocity = 40.0 # inches/s
         
         self.heading = 0.0 # radians
@@ -506,7 +535,7 @@ def main():
     calibrator = LutCalibrator(CALIBRATION_EXPORT_PATH, TURRET_POSITION_LUT)
     projectiles = []
     
-    projectile_speed = 100.0 # inches/s (FTC shots are fast)
+    projectile_speed = 200.0 # inches/s (FTC shots are fast)
     
     space_held_time = 0.0
     rapid_fire_timer = 0.0
@@ -516,17 +545,15 @@ def main():
         dt = clock.tick(60) / 1000.0
         if dt == 0:
             continue
-            
+
+        current_goal = RED_GOAL_POSE if robot.is_targeting_red else BLUE_GOAL_POSE
         keys = pygame.key.get_pressed()
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 run = False
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_c:
-                    enabled = calibrator.toggle(
-                        robot,
-                        RED_GOAL_POSE if robot.is_targeting_red else BLUE_GOAL_POSE
-                    )
+                    enabled = calibrator.toggle(robot, current_goal)
                     print(f"Calibration mode {'enabled' if enabled else 'disabled'}")
                 elif event.key == pygame.K_v and calibrator.enabled:
                     sample, replaced = calibrator.add_sample(robot)
@@ -547,15 +574,17 @@ def main():
                 elif event.key == pygame.K_TAB:
                     # Switch Targets
                     robot.is_targeting_red = not robot.is_targeting_red
+                    current_goal = RED_GOAL_POSE if robot.is_targeting_red else BLUE_GOAL_POSE
                     if calibrator.enabled:
-                        calibrator.set_goal_default(RED_GOAL_POSE if robot.is_targeting_red else BLUE_GOAL_POSE)
+                        calibrator.set_goal_default(current_goal)
             elif event.type == pygame.JOYBUTTONDOWN:
                 if event.button == 0: # A Button
                     projectiles.append(Projectile(robot.position, robot.heading + robot.turret.angle, projectile_speed, robot.velocity))
                 elif event.button == 1: # B Button
                     robot.is_targeting_red = not robot.is_targeting_red
+                    current_goal = RED_GOAL_POSE if robot.is_targeting_red else BLUE_GOAL_POSE
                     if calibrator.enabled:
-                        calibrator.set_goal_default(RED_GOAL_POSE if robot.is_targeting_red else BLUE_GOAL_POSE)
+                        calibrator.set_goal_default(current_goal)
             elif event.type == pygame.MOUSEBUTTONDOWN and calibrator.enabled:
                 if event.button == 1:
                     calibrator.set_manual_aim_point_from_pixel(event.pos)
@@ -607,7 +636,7 @@ def main():
             p.draw(screen)
             
         robot.draw(screen)
-        calibrator.draw(screen)
+        calibrator.draw(screen, current_goal)
         
         # Telemetry
         goal_str = "RED (144, 144)" if robot.is_targeting_red else "BLUE (0, 144)"

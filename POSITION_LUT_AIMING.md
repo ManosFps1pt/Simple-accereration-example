@@ -81,6 +81,38 @@ samples = [
 
 You can hardcode it, load it from JSON, or generate it from a constants file.
 
+## Mirroring For The Other Goal
+
+The LUT should be stored in **one canonical goal frame** and mirrored when aiming at the opposite goal.
+
+For this simulator, the practical choice is:
+
+- tune and store samples for one goal
+- when aiming at the other goal, mirror both:
+  - the sample robot positions
+  - the sample virtual aim points
+
+If the field is mirrored left-to-right, the transform is:
+
+```text
+mirroredX = fieldWidth - x
+mirroredY = y
+```
+
+So if a stored sample is:
+
+```python
+((36.0, 108.0), (20.0, 141.0))
+```
+
+then the mirrored version for the opposite goal becomes:
+
+```python
+((108.0, 108.0), (124.0, 141.0))
+```
+
+This lets one LUT serve both goals without maintaining two independent tables.
+
 ## Runtime Behavior
 
 ### 1. Get current robot position
@@ -90,7 +122,14 @@ Read the robot's current field pose:
 - `robotX`
 - `robotY`
 
-### 2. Interpolate a virtual aim point from the LUT
+### 2. Mirror the LUT if targeting the opposite goal
+
+Before interpolation:
+
+- if aiming at the canonical tuned goal, use the LUT as stored
+- if aiming at the opposite goal, mirror every sample's robot point and aim point across the field centerline
+
+### 3. Interpolate a virtual aim point from the LUT
 
 Given the current robot position, interpolate an aim point from nearby LUT samples.
 
@@ -117,7 +156,7 @@ Special case:
 
 - if the robot is essentially exactly on a sample point, return that sample's aim point directly
 
-### 3. Compute turret target angle
+### 4. Compute turret target angle
 
 Once the interpolated virtual aim point is found:
 
@@ -133,10 +172,29 @@ If the turret controller wants a global heading instead of a relative heading, u
 ## Pseudocode
 
 ```python
-def get_virtual_aim_point(robot_x, robot_y, lut_samples, neighbor_count=3):
+def mirror_point_if_needed(x, y, target_is_opposite_goal, field_width):
+    if not target_is_opposite_goal:
+        return x, y
+    return field_width - x, y
+
+
+def get_goal_adjusted_samples(lut_samples, target_is_opposite_goal, field_width):
+    adjusted = []
+    for (sample_x, sample_y), (aim_x, aim_y) in lut_samples:
+        adj_sample_x, adj_sample_y = mirror_point_if_needed(
+            sample_x, sample_y, target_is_opposite_goal, field_width
+        )
+        adj_aim_x, adj_aim_y = mirror_point_if_needed(
+            aim_x, aim_y, target_is_opposite_goal, field_width
+        )
+        adjusted.append(((adj_sample_x, adj_sample_y), (adj_aim_x, adj_aim_y)))
+    return adjusted
+
+
+def get_virtual_aim_point(robot_x, robot_y, adjusted_samples, neighbor_count=3):
     weighted = []
 
-    for (sample_x, sample_y), (aim_x, aim_y) in lut_samples:
+    for (sample_x, sample_y), (aim_x, aim_y) in adjusted_samples:
         dx = robot_x - sample_x
         dy = robot_y - sample_y
         distance = hypot(dx, dy)
@@ -162,8 +220,11 @@ def get_virtual_aim_point(robot_x, robot_y, lut_samples, neighbor_count=3):
     return sum_x / total_weight, sum_y / total_weight
 
 
-def get_turret_target(robot_x, robot_y, robot_heading, lut_samples):
-    aim_x, aim_y = get_virtual_aim_point(robot_x, robot_y, lut_samples)
+def get_turret_target(robot_x, robot_y, robot_heading, lut_samples, target_is_opposite_goal, field_width):
+    adjusted_samples = get_goal_adjusted_samples(
+        lut_samples, target_is_opposite_goal, field_width
+    )
+    aim_x, aim_y = get_virtual_aim_point(robot_x, robot_y, adjusted_samples)
     dx = aim_x - robot_x
     dy = aim_y - robot_y
     field_angle = atan2(dy, dx)
@@ -177,8 +238,9 @@ If the robot also supports shoot-on-the-move compensation, keep the concepts sep
 Recommended order:
 
 1. decide whether turret heading is computed from the real robot pose or a motion-compensated pose
-2. get the virtual aim point from the LUT
-3. compute the angle from the chosen pose to that virtual aim point
+2. mirror the LUT if targeting the opposite goal
+3. get the virtual aim point from the LUT
+4. compute the angle from the chosen pose to that virtual aim point
 
 Important:
 
@@ -203,13 +265,15 @@ Best practices:
 
 - collect more points in shallow-angle regions where misses are large
 - collect fewer points where center aiming already works
-- keep left and right side samples balanced if the field use is symmetric
+- if the opposite goal is a mirror image, you usually do not need to tune both sides separately
+- keep the LUT in one canonical frame and mirror it at runtime
 - use the same pose-estimation coordinate frame in tuning and runtime
 
 ## Failure Modes To Avoid
 
 - using distance-only correction instead of position-based correction
 - mixing coordinate systems between tuned samples and runtime localization
+- forgetting to mirror both robot sample positions and virtual aim points when swapping goals
 - applying turret-relative offsets when the LUT values were tuned in field coordinates
 - using too few points in difficult regions
 - allowing one bad sample to distort a large area
@@ -220,17 +284,18 @@ Best practices:
 - expose a function like `getVirtualAimPoint(robotPose)` or `getTurretTargetAngle(robotPose)`
 - make it easy to disable LUT aiming for testing
 - log the selected / interpolated aim point during tuning
-- if alliance matters, either maintain separate LUTs or transform coordinates consistently
+- prefer a single canonical LUT plus a consistent mirroring transform for the opposite goal
 
 ## What The Implementing Agent Should Build
 
 Another agent working in the robot code should implement:
 
 1. a data structure holding `((robot_x, robot_y), (aim_x, aim_y))` samples
-2. nearest-neighbor inverse-distance interpolation
-3. conversion from interpolated aim point to turret target angle
-4. a switch to enable / disable LUT aiming
-5. optional telemetry:
+2. goal-aware mirroring of the LUT for the opposite goal
+3. nearest-neighbor inverse-distance interpolation
+4. conversion from interpolated aim point to turret target angle
+5. a switch to enable / disable LUT aiming
+6. optional telemetry:
    - robot pose
    - chosen neighbors
    - interpolated aim point
@@ -249,3 +314,5 @@ It asks:
 - "From this robot position on the field, what point should I really aim at so the shot goes in?"
 
 That virtual aim point is interpolated from tuned samples, and the turret points at that point instead of the goal center.
+
+If the robot switches to the opposite goal, the LUT should be mirrored so the same tuned behavior applies on the other side of the field.
